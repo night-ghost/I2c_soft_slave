@@ -1,14 +1,11 @@
-ttps://www.google.ru/url?sa=t&rct=j&q=&esrc=s&source=web&cd=61&cad=rja&uact=8&ved=0ahUKEwi5jPDlgqjQAhVBOywKHT7CBgA4PBAWCBowAA&url=https%3A%2F%2Fwww.thinkmind.org%2Fdownload.php%3Farticleid%3Dicons_2011_1_10_20003&usg=AFQjCNGhWB0irTCLzuV0aU8J-nNCk7sppw&sig2=eg0sxI0yh127EH2iIYTtBw
+// https://www.google.ru/url?sa=t&rct=j&q=&esrc=s&source=web&cd=61&cad=rja&uact=8&ved=0ahUKEwi5jPDlgqjQAhVBOywKHT7CBgA4PBAWCBowAA&url=https%3A%2F%2Fwww.thinkmind.org%2Fdownload.php%3Farticleid%3Dicons_2011_1_10_20003&usg=AFQjCNGhWB0irTCLzuV0aU8J-nNCk7sppw&sig2=eg0sxI0yh127EH2iIYTtBw
+
+#include "I2c_soft_slave.h"
 
 #define NINTH_BIT 9
 #define BYTE_LENGTH 8
 #define SEVENTH_BIT 7
 
-
-#define init_i2c(callback) do { \
-        MSP430_SWI2CSV_init();      \
-        regI2CCallBack(callback);   \
-    } while(0)
 
 
 #define SCL_H      {*scl_ddr_port &= ~scl_bit; }
@@ -24,26 +21,87 @@ ttps://www.google.ru/url?sa=t&rct=j&q=&esrc=s&source=web&cd=61&cad=rja&uact=8&ve
 
 // we need only PC pins so only pcint8-15 interrupts, PCIE1 flag and PCMSK1 register
 
-byte rising_edge_counter=0;
-byte falling_edge_counter=0;
-bool restart=false;
 
-enum I2C_STATES  state; // states relative to SLAVE so we send in TRANSMIT state
+         byte  Soft_I2C::scl_bit;
+volatile byte *Soft_I2C::scl_ddr_port;
+volatile byte *Soft_I2C::scl_in_port;
+         byte  Soft_I2C::sda_bit;
+volatile byte *Soft_I2C::sda_ddr_port;
+volatile byte *Soft_I2C::sda_in_port;
+
+byte Soft_I2C::scl_front;
+byte Soft_I2C::sda_front;
+
+byte Soft_I2C::rising_edge_counter=0;
+byte Soft_I2C::falling_edge_counter=0;
+bool Soft_I2C::restart=false;
 
 
-write(byte *addr, byte len){ // just store data pointer and size
+byte Soft_I2C::_address;
+bool Soft_I2C::_readwrite;
+byte Soft_I2C::_data;
+byte Soft_I2C::_tmp; // shift register
+bool Soft_I2C::_bit;
+bool Soft_I2C::repeat_start;
+
+
+byte Soft_I2C::_register;
+
+// data management
+byte *Soft_I2C::_buffer;
+byte Soft_I2C::_ptr;
+byte Soft_I2C::_size;
+
+
+Handle Soft_I2C::xmit_cb;
+Handle Soft_I2C::recv_cb;
+Handleb Soft_I2C::done_cb;
+    
+
+
+enum I2C_STATES  Soft_I2C::state; // states relative to SLAVE so we send in TRANSMIT state
+
+
+void Soft_I2C::write(byte *addr, byte len){ // just store data pointer and size
     _buffer=addr;
     _ptr=0;
     _size=len;
 }
 
-read(byte *addr, byte len){
+void Soft_I2C::read(byte *addr, byte len){
     _buffer=addr;
     _ptr=0;
     _size=len;
 }
 
-void begin(byte address, Handle recv, Handle xmit, Handleb done){
+// prepare but don't touch pins
+Soft_I2C::Soft_I2C(const int scl_pin, const int sda_pin)
+{
+    uint8_t port;
+
+
+    port = digitalPinToPort(scl_pin);
+    scl_bit  = digitalPinToBitMask(scl_pin);
+//    scl_out_port = portOutputRegister(port);
+    scl_in_port = portInputRegister(port);
+    scl_ddr_port = portModeRegister(port);
+
+
+    port = digitalPinToPort(sda_pin);
+    sda_bit  = digitalPinToBitMask(sda_pin);
+//    sda_out_port = portOutputRegister(port);
+    sda_in_port = portInputRegister(port);
+    sda_ddr_port = portModeRegister(port); // 1 -> output
+
+    SDA_H;
+    SCL_H;
+
+    digitalWrite(scl_pin, 0);
+    digitalWrite(sda_pin, 0);
+}
+
+
+void Soft_I2C::begin(byte address, Handle recv, Handle xmit, Handleb done){
     SDA_H;
     SCL_H;
 
@@ -66,35 +124,40 @@ void begin(byte address, Handle recv, Handle xmit, Handleb done){
     
 }
 
-void end(){
+void Soft_I2C::end(){
     disable_scl_intr();
     disable_sda_intr();
 }
 
-~Soft_I2C(){
+Soft_I2C::~Soft_I2C(){
     end();
 }
 
 
-ISR(PCINT1){
+ISR(PCINT1_vect){
+    Soft_I2C::isr();
+}
+
+void Soft_I2C::isr(){
     bool sda=SDA_read; // read current values
     bool scl=SDA_read;
     
     if(scl_front) { // we want rising interrupt
-        if(scl) SCL_ISR(); // yes we got!
+        if(scl)  SCL_ISR(); // yes we got!
     } else {        // we need falling edge
         if(!scl) SCL_ISR(); // yes we got!
     }
 
     if(sda_front) { // we want rising interrupt
-        if(sda) SDA_ISR(); // yes we got!
+        if(sda)  SDA_ISR(); // yes we got!
     } else {        // we need falling edge
         if(!sda) SDA_ISR(); // yes we got!
     }
 }
 
 
-void SCL_ISR(void) // SCL
+
+void Soft_I2C::SCL_ISR(void) // SCL
 {
     if(SCL_read) {  // Low to High (Rising Edge)    
         rising_edge_counter++;
@@ -107,6 +170,8 @@ void SCL_ISR(void) // SCL
 
         case SLAVE_NOTMY_ADDRESS:
             address_low_high1to9(); // just set interrupt direction - nothing else at high SCL
+            break;
+        default:
             break;
         }
         if(rising_edge_counter==NINTH_BIT)
@@ -142,17 +207,19 @@ void SCL_ISR(void) // SCL
         case SLAVE_DATA_TRANSMIT:
             if(falling_edge_counter<=SEVENTH_BIT)
                 transmit_high_low1to7();
-            else if(falling_edge_counter==BYTE_LENGHT)
+            else if(falling_edge_counter==BYTE_LENGTH)
                 transmit_high_low8();
             else
                 transmit_high_low9();
+        default:
+            break;
         }
         if(falling_edge_counter==NINTH_BIT)
             falling_edge_counter=0;
     }
 }
 
-void SDA_ISR(void) // SDA
+void Soft_I2C::SDA_ISR(void) // SDA
 {
     if(! SCL_read) {          // SCL Low - glitch
         clear_sda_intr();    // Clear SDA interrupt flag
@@ -168,7 +235,6 @@ void SDA_ISR(void) // SDA
                 _register=_buffer[0]; // received byte is register number
             }
             state=SLAVE_ADDRESS_RECEIVE;
-            index=0;
             _tmp=0;
             _data=0;
 
@@ -186,14 +252,14 @@ void SDA_ISR(void) // SDA
             
             _buffer=0; // no more
             
-            if(_done) _done(_ptr-1); // send data size to finish proc
+            if(done_cb) done_cb(_ptr-1); // send data size to finish proc
         }
     }
 }
 
 
 // just adjust interrupts - we shouldn't do anything at high SCL
-void address_low_high1to9(){ // SCL // Low to High (Rising Edge) all modes
+void Soft_I2C::address_low_high1to9(){ // SCL // Low to High (Rising Edge) all modes
     if( SDA_read )          // Set SDA interrupt edge
         set_sda_falling_intr(); // SCL for 1->0 interrupt edge
     else
@@ -207,7 +273,7 @@ void address_low_high1to9(){ // SCL // Low to High (Rising Edge) all modes
 
 
 
-void address_high_low1to7(){ // // SCL High to Low (Falling Edge) on address receive, data bits
+void Soft_I2C::address_high_low1to7(){ // // SCL High to Low (Falling Edge) on address receive, data bits
     SCL_L;      // extend clock
     set_scl_rising_intr();
     clear_scl_intr();
@@ -219,7 +285,7 @@ void address_high_low1to7(){ // // SCL High to Low (Falling Edge) on address rec
     if(_bit) _tmp |= 1; // data bits to shift register
 }
 
-void address_high_low8(){ // got read/write bit
+void Soft_I2C::address_high_low8(){ // got read/write bit
     SCL_L; // extend clock
 
     if(_address == _tmp) {  // we got correct address
@@ -237,16 +303,15 @@ void address_high_low8(){ // got read/write bit
 }
 
 
-void send_bit(){
-    if(_data & 0x80)
-        SDA_H;
-    else
-        SDA_L;
+void Soft_I2C::send_bit(){
+    if(_data & 0x80){    SDA_H; }
+    else            {    SDA_L; }
+    
     _data <<= 1; // Left shift transmit data
 }
 
 
-void send_byte(){
+void Soft_I2C::send_byte(){
     if(!_buffer) return;
     
     /*store the transmit data bitwise to SDA line*/    
@@ -258,7 +323,7 @@ void send_byte(){
     send_bit();
 }
 
-void address_high_low9(){
+void Soft_I2C::address_high_low9(){
     SCL_L; // extend clock
 
 // if we come here then address is correct - else state changes to SLAVE_NOTMY_ADDRESS
@@ -283,12 +348,12 @@ void address_high_low9(){
     set_scl_rising_intr();
     clear_scl_intr();
     disable_sda_intr();
-    SCL_H(); // release SCL
+    SCL_H; // release SCL
 }
 
 
 
-void notmyaddress_high_low1to9(){
+void Soft_I2C::notmyaddress_high_low1to9(){
     set_scl_rising_intr();
     clear_scl_intr();
     disable_sda_intr();
@@ -296,7 +361,7 @@ void notmyaddress_high_low1to9(){
 
 
 
-void receive_high_low1to7(){ // receiving byte
+void Soft_I2C::receive_high_low1to7(){ // receiving byte
     SCL_L; // extend clock
     set_scl_rising_intr();
     clear_scl_intr();
@@ -308,7 +373,7 @@ void receive_high_low1to7(){ // receiving byte
 }
 
 
-void receive_high_low8(){ // last bit of byte is come - we should confirm it
+void Soft_I2C::receive_high_low8(){ // last bit of byte is come - we should confirm it
     SCL_L;    // extend clock
     SDA_L;      // ACK
     set_scl_rising_intr();
@@ -323,7 +388,7 @@ void receive_high_low8(){ // last bit of byte is come - we should confirm it
 
 }
 
-void receive_high_low9(){  // ACK done, release bus
+void Soft_I2C::receive_high_low9(){  // ACK done, release bus
     SCL_L; // extend clock
     SDA_H;      // end of ACK
     set_scl_rising_intr();
@@ -346,7 +411,7 @@ void receive_high_low9(){  // ACK done, release bus
 }
 
 
-void transmit_high_low1to7(){  // transmit byte
+void Soft_I2C::transmit_high_low1to7(){  // transmit byte
     SCL_L; // extend clock
     set_scl_rising_intr();
     clear_scl_intr();
@@ -357,7 +422,7 @@ void transmit_high_low1to7(){  // transmit byte
 }
 
 
-void transmit_high_low8(){ // last bit of byte is transmitted - read ACK
+void Soft_I2C::transmit_high_low8(){ // last bit of byte is transmitted - read ACK
     SCL_L; // extend clock
     SDA_H;
     set_scl_rising_intr();
@@ -367,7 +432,7 @@ void transmit_high_low8(){ // last bit of byte is transmitted - read ACK
 }
 
 
-void transmit_high_low9(){
+void Soft_I2C::transmit_high_low9(){
     SCL_L;
 
     if(_bit) { // we got NACK and should stop transmitting

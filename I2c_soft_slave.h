@@ -18,11 +18,11 @@
 #pragma once
 
 #include <stdbool.h>
-#include <stm32f4xx.h>
-#include <hal.h>
-#include "gpiopins.h"
-#include "systick.h"
-#include "Scheduler.h"
+#include <inttypes.h>
+
+#include "Arduino.h"
+
+typedef uint8_t byte;
 
 enum I2C_STATES {
     SLAVE_IDLE =0,
@@ -40,14 +40,13 @@ public:
     Soft_I2C( const int scl_pin, const int sda_pin);
     ~Soft_I2C();
 
-    static void begin(byte address, Handle xmit, Handle recv, Handleb done);
+    static void begin(byte address, Handle xmit, Handle recv, Handleb done=NULL);
     static void end();
 
-    static uint32_t writeBuffer( uint8_t addr_, uint8_t reg_, uint8_t len_, const uint8_t *data);
-    static uint32_t write( uint8_t addr_, uint8_t reg, uint8_t data);
-    static uint32_t read( uint8_t addr_, uint8_t reg, uint8_t len, uint8_t* buf);
-    static uint32_t transfer(uint8_t  addr, uint8_t  send_len, const uint8_t *send, uint8_t len, uint8_t *buf);
-    
+    static void write(byte *addr, byte len);
+    static void read(byte *addr, byte len);
+
+    static void isr();
 
 private:
 
@@ -61,10 +60,17 @@ private:
     static byte scl_front;
     static byte sda_front;
 
+    static byte rising_edge_counter;
+    static byte falling_edge_counter;
+    static bool restart;
+
     static byte _address;
+    static bool _readwrite;
     static byte _data;
-    static byte state;
+    static enum I2C_STATES state;
     static byte _tmp; // shift register
+    static bool _bit;
+    static bool repeat_start;
     
     static byte _register;
 
@@ -108,5 +114,25 @@ private:
     static inline void enable_sda_intr(){
         PCMSK1 |= sda_bit;
     }
+
+
+    static void send_byte();
+    static void send_bit();
+
+    static void address_low_high1to9(); // just set interrupt direction - nothing else at high SCL
+    static void address_high_low1to7();
+    static void address_high_low8();    // write / read
+    static void address_high_low9();    // ACK
+    static void notmyaddress_high_low1to9(); // just set interrupts
+    static void receive_high_low1to7();
+    static void receive_high_low8();
+    static void receive_high_low9();
+    static void transmit_high_low1to7();
+    static void transmit_high_low8();
+    static void transmit_high_low9();
+
+
+    static void SCL_ISR();
+    static void SDA_ISR();
 };
 
